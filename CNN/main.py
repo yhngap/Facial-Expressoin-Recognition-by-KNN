@@ -1,9 +1,5 @@
 from __future__ import print_function, division
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import os
-from model import Model
 from torchvision import datasets, transforms
 import cv2
 import face_recognition
@@ -12,6 +8,7 @@ from model import *
 from VGG import *
 from resnet import *
 from alexnet import *
+from saliency import *
 
 emotion={0:"angry",1:"disgust",2:"fear",3:"happy",4:"sad",5:"surprise",6:"neutral"}
 use_gpu = torch.cuda.is_available()
@@ -31,10 +28,12 @@ def get_trained_model():
     return Model()
 
 
-def train_model(model, criterion, optimizer, num_epochs=1):
+def train_model(model, criterion, optimizer, num_of_epochs=1):
     data_transforms = {
         'train': transforms.Compose([
             transforms.RandomResizedCrop(42),
+            transforms.ColorJitter(brightness=0.7),
+            transforms.RandomRotation(30),
             transforms.RandomHorizontalFlip(),
             transforms.Grayscale(),
             transforms.ToTensor(),
@@ -47,25 +46,34 @@ def train_model(model, criterion, optimizer, num_epochs=1):
     }
 
     data_dir = r"./training"
-    image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms[x]) for x in ['train', 'test']}
-    dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=4)
-                   for x in ['train', 'test']}
-    dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'test']}
+    image_datasets = {'train': datasets.ImageFolder(os.path.join(data_dir, 'train'), data_transforms['train']),
+                      'test': datasets.ImageFolder(os.path.join(data_dir, 'test'), data_transforms['test'])
+                      }
+    dataloaders = {'train': torch.utils.data.DataLoader(image_datasets['train'], batch_size=32, shuffle=True, num_workers=4),
+                   'test': torch.utils.data.DataLoader(image_datasets['test'], batch_size=32, shuffle=True,
+                                                        num_workers=4)}
+    fer_sizes = {'train': len(image_datasets['train']),'test': len(image_datasets['test'])}
     best_acc = 0.0
+    best_loss=1.0
 
-    for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch + 1, num_epochs))
+    total_accuracy=[]
+    total_loss=[]
 
-        for phase in ['train', 'test']:
-            if phase == 'train':
+    axis_epoch=np.arange(num_of_epochs,step=1)
+
+    for epoch in range(num_of_epochs):
+        print('Epoch ',epoch + 1)
+
+        for stage in ['train', 'test']:
+            if stage == 'train':
                 model.train(True)
             else:
                 model.train(False)
 
-            running_loss = 0.0
-            running_corrects = 0
+            intermediate_loss = 0.0
+            intermediate_correctness = 0
 
-            for data in dataloaders[phase]:
+            for data in dataloaders[stage]:
                 inputs, labels = data
                 inputs=inputs.to(device)
                 labels=labels.to(device)
@@ -74,26 +82,42 @@ def train_model(model, criterion, optimizer, num_epochs=1):
                 outputs = model(inputs)
                 _, preds = torch.max(outputs.data, 1)
                 loss = criterion(outputs, labels)
+                if epoch==2:
+                    pass
+                    #show_saliency_maps(inputs,labels,model)
 
-                if phase == 'train':
+                if stage == 'train':
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
 
-                running_loss += loss.data
+                intermediate_loss += loss.data
                 correctness=[1 if preds[i] == labels.data[i] else 0 for i in range(len(preds))]
-                running_corrects += torch.sum(torch.cuda.FloatTensor(correctness))
+                intermediate_correctness += torch.sum(torch.cuda.FloatTensor(correctness))
 
-            epoch_loss = running_loss / dataset_sizes[phase]
-            epoch_acc = running_corrects / dataset_sizes[phase]
+            epoch_loss = intermediate_loss / fer_sizes[stage]
+            epoch_acc = intermediate_correctness / fer_sizes[stage]
 
-            print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
-
-            if phase == 'test' and epoch_acc > best_acc:
+            print('Loss: ',epoch_loss,' Acc: ', epoch_acc)
+            if stage == 'test' and epoch_acc > best_acc:
                 best_acc = epoch_acc
-
-        print('Best test Acc: {:4f}'.format(best_acc))
+            if stage == 'test' and (epoch_loss < best_loss):
+                best_loss = epoch_loss
+        total_accuracy.append(best_acc.cpu().numpy())
+        total_loss.append(best_loss.cpu().numpy())
         torch.save(model, 'model')
+    total_accuracy=np.array(total_accuracy)
+    total_loss=np.array(total_loss)
+
+    print(total_accuracy)
+    print(total_loss)
+
+    plt.title('training accuracy')
+    plt.plot(axis_epoch,total_accuracy)
+    plt.legend(['Our Model'], loc='upper left')
+    plt.show()
+
+
 
 
 def most_frequent(List):
@@ -144,24 +168,50 @@ def video_recognition(model):
     cv2.destroyAllWindows()
 
 def main():
-    test_resnet()
-    test_alexnet()
-    test_vgg()
-    test_mymodel()
     print("please input the number you want to do:")
     user_input = input("1: train model, 2: real-time demo, 3: exit program ")
-    if user_input == 1:
+    if user_input == '1':
+        plt.ylabel('accuracy')
+        plt.xlabel('epoch')
+
         model = Model()  # either get the pre-trained model or trained
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters())
-        train_model(model, criterion, optimizer, num_epochs=1)
-    if user_input == 2:
+        optimizer = optim.Adadelta(model.parameters())
+        train_model(model, criterion, optimizer, num_of_epochs=25)
+
+        model = Model()  # either get the pre-trained model or trained
+        model = model.to(device)
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        train_model(model, criterion, optimizer, num_of_epochs=25)
+
+        model = Model()  # either get the pre-trained model or trained
+        model = model.to(device)
+        optimizer = optim.RMSprop(model.parameters())
+        train_model(model, criterion, optimizer, num_of_epochs=25)
+
+        model = Model()  # either get the pre-trained model or trained
+        model = model.to(device)
+        optimizer = optim.Adagrad(model.parameters())
+        train_model(model, criterion, optimizer, num_of_epochs=25)
+        # model =VGG16()
+        # optimizer = optim.Adam(model.parameters())
+        # train_model(model, criterion, optimizer, num_of_epochs=25)
+        # model =ResNet18()
+        # optimizer = optim.Adam(model.parameters())
+        # train_model(model, criterion, optimizer, num_of_epochs=25)
+        # model = AlexNet()
+        # optimizer = optim.Adam(model.parameters())
+        # train_model(model, criterion, optimizer, num_of_epochs=25)
+        # plt.legend(['Our model', 'VGG16', 'ResNet', 'AlexNet'], loc='upper left')
+        # plt.show()
+    if user_input == '2':
         model.train(False)
         video_recognition(model)
-    if user_input == 3:
+    if user_input == '3':
         pass
 
 
 if __name__ == '__main__':
+    pass
     main()
